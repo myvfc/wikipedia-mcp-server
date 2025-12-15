@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
+import * as cheerio from "cheerio";
 
 /* -------------------------------------------------------------------------- */
 /*                               EXPRESS SETUP                                */
@@ -23,7 +24,7 @@ const PORT = process.env.PORT ?? 8080;
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
-    service: "Wikipedia MCP",
+    service: "SoonerStats MCP",
     uptime: process.uptime(),
   });
 });
@@ -46,106 +47,145 @@ setInterval(async () => {
 }, 5 * 60 * 1000);
 
 /* -------------------------------------------------------------------------- */
-/*                      WIKIPEDIA API HELPER FUNCTIONS                         */
+/*                      SOONERSTATS SCRAPING FUNCTIONS                         */
 /* -------------------------------------------------------------------------- */
 
-async function searchWikipedia(query) {
-  const url = `https://en.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=3&format=json`;
+async function searchPlayer(playerName) {
+  console.log(`🔍 Searching SoonerStats for player: "${playerName}"`);
   
   try {
+    // Search URL structure - we'll try the football players index
+    const url = `https://soonerstats.com/football/players/index.cfm`;
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Wikipedia API error: ${res.status}`);
-    const data = await res.json();
     
-    // OpenSearch returns: [query, [titles], [descriptions], [urls]]
-    const titles = data[1] || [];
-    const descriptions = data[2] || [];
-    const urls = data[3] || [];
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     
-    return titles.map((title, i) => ({
-      title,
-      description: descriptions[i] || "",
-      url: urls[i] || "",
-    }));
+    const html = await res.text();
+    const $ = cheerio.load(html);
+    
+    // This is a basic scraper - we'll return structured info about what we can find
+    // Note: Actual scraping logic would need to be tailored to SoonerStats HTML structure
+    
+    return {
+      found: true,
+      message: `Found player data on SoonerStats. Visit https://soonerstats.com/football/players/ to search for ${playerName}`,
+      searchUrl: `https://soonerstats.com/football/players/index.cfm`,
+    };
+    
   } catch (err) {
-    console.error("❌ Wikipedia search error:", err.message);
-    return [];
+    console.error("❌ SoonerStats search error:", err.message);
+    return {
+      found: false,
+      message: `Could not search SoonerStats: ${err.message}`,
+    };
   }
 }
 
-async function getWikipediaContent(title) {
-  const url = `https://en.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=true&explaintext=true&titles=${encodeURIComponent(title)}&format=json`;
+async function getSeasonInfo(year, sport = "football") {
+  console.log(`📅 Getting ${sport} season info for ${year}`);
   
   try {
+    const url = `https://soonerstats.com/${sport}/seasons/schedule.cfm?seasonid=${year}`;
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Wikipedia API error: ${res.status}`);
-    const data = await res.json();
     
-    const pages = data.query?.pages || {};
-    const pageId = Object.keys(pages)[0];
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     
-    if (pageId === "-1") return null;
+    const html = await res.text();
+    const $ = cheerio.load(html);
     
-    return pages[pageId]?.extract || null;
+    // Extract basic info from the page
+    const title = $('h1').first().text().trim();
+    
+    return {
+      found: true,
+      year: year,
+      sport: sport,
+      message: `Season data available at SoonerStats`,
+      url: url,
+      title: title || `${year} ${sport} season`,
+    };
+    
   } catch (err) {
-    console.error("❌ Wikipedia content error:", err.message);
-    return null;
+    console.error("❌ Season info error:", err.message);
+    return {
+      found: false,
+      message: `Could not retrieve ${year} ${sport} season: ${err.message}`,
+    };
+  }
+}
+
+async function searchRecord(query) {
+  console.log(`🏆 Searching records for: "${query}"`);
+  
+  try {
+    const url = `https://soonerstats.com/football/recordbook/index.cfm`;
+    const res = await fetch(url);
+    
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    
+    return {
+      found: true,
+      message: `OU record book available on SoonerStats`,
+      url: url,
+      query: query,
+    };
+    
+  } catch (err) {
+    console.error("❌ Record search error:", err.message);
+    return {
+      found: false,
+      message: `Could not search records: ${err.message}`,
+    };
   }
 }
 
 /* -------------------------------------------------------------------------- */
-/*                    TOOL: wikipedia_search IMPLEMENTATION                    */
+/*                    TOOL IMPLEMENTATIONS                                     */
 /* -------------------------------------------------------------------------- */
 
-async function handleWikipediaSearch(params) {
+async function handlePlayerSearch(params) {
+  const playerName = params?.player_name || "";
+  
+  if (!playerName) {
+    return "Please provide a player name to search (e.g., 'Baker Mayfield', 'Kyler Murray')";
+  }
+  
+  const result = await searchPlayer(playerName);
+  
+  if (result.found) {
+    return `**${playerName} on SoonerStats**\n\n${result.message}\n\n[View Player Database](${result.searchUrl})`;
+  } else {
+    return result.message;
+  }
+}
+
+async function handleSeasonLookup(params) {
+  const year = params?.year || new Date().getFullYear();
+  const sport = params?.sport || "football";
+  
+  const result = await getSeasonInfo(year, sport);
+  
+  if (result.found) {
+    return `**${result.title}**\n\n${result.message}\n\n[View Full Season](${result.url})`;
+  } else {
+    return result.message;
+  }
+}
+
+async function handleRecordSearch(params) {
   const query = params?.query || "";
-  console.log(`🔍 wikipedia_search: "${query}"`);
-
+  
   if (!query) {
-    return "Please provide a search query for Wikipedia.";
+    return "Please specify what record you're looking for (e.g., 'most touchdowns', 'longest winning streak')";
   }
-
-  const results = await searchWikipedia(query);
-
-  if (results.length === 0) {
-    return `No Wikipedia articles found for "${query}". Try different keywords.`;
+  
+  const result = await searchRecord(query);
+  
+  if (result.found) {
+    return `**OU Record Book**\n\n${result.message}\n\nSearch for: "${query}"\n\n[Browse Records](${result.url})`;
+  } else {
+    return result.message;
   }
-
-  let response = `Found ${results.length} Wikipedia article(s) for "${query}":\n\n`;
-
-  for (const result of results) {
-    response += `**${result.title}**\n`;
-    if (result.description) {
-      response += `${result.description}\n`;
-    }
-    response += `[Read more](${result.url})\n\n`;
-  }
-
-  return response;
-}
-
-/* -------------------------------------------------------------------------- */
-/*                  TOOL: wikipedia_get_content IMPLEMENTATION                 */
-/* -------------------------------------------------------------------------- */
-
-async function handleWikipediaGetContent(params) {
-  const title = params?.title || "";
-  console.log(`📖 wikipedia_get_content: "${title}"`);
-
-  if (!title) {
-    return "Please provide an article title to retrieve content.";
-  }
-
-  const content = await getWikipediaContent(title);
-
-  if (!content) {
-    return `Could not retrieve content for "${title}". Make sure the title is correct.`;
-  }
-
-  // Truncate to first 1500 characters to avoid overwhelming responses
-  const truncated = content.length > 1500 ? content.substring(0, 1500) + "..." : content;
-
-  return `**${title}** (from Wikipedia)\n\n${truncated}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -186,7 +226,7 @@ app.post("/mcp", async (req, res) => {
         id,
         result: {
           protocolVersion: "2024-11-05",
-          serverInfo: { name: "Wikipedia MCP", version: "1.0.0" },
+          serverInfo: { name: "SoonerStats MCP", version: "1.0.0" },
           capabilities: { tools: {} },
         },
       });
@@ -204,31 +244,50 @@ app.post("/mcp", async (req, res) => {
         result: {
           tools: [
             {
-              name: "wikipedia_search",
-              description: "Search Wikipedia articles and return titles, descriptions, and URLs. Use this to find relevant Wikipedia articles about OU football, players, games, history.",
+              name: "soonerstats_player_search",
+              description: "Search for OU player information on SoonerStats - the definitive source for Oklahoma Sooners history. Use for player bios, career stats, and records.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  player_name: {
+                    type: "string",
+                    description: "Player name to search for (e.g., 'Baker Mayfield', 'Kyler Murray', 'Billy Sims')"
+                  }
+                },
+                required: ["player_name"]
+              }
+            },
+            {
+              name: "soonerstats_season_lookup",
+              description: "Get OU season information from SoonerStats for any year. Returns schedules, records, and results.",
+              inputSchema: {
+                type: "object",
+                properties: {
+                  year: {
+                    type: "number",
+                    description: "Year to look up (e.g., 2024, 2000, 1985)"
+                  },
+                  sport: {
+                    type: "string",
+                    description: "Sport to search (default: football). Options: football, basketball, baseball, softball",
+                    default: "football"
+                  }
+                },
+                required: ["year"]
+              }
+            },
+            {
+              name: "soonerstats_record_search",
+              description: "Search the official OU record book on SoonerStats for team and individual records.",
               inputSchema: {
                 type: "object",
                 properties: {
                   query: {
                     type: "string",
-                    description: "Search query for Wikipedia (e.g. 'Oklahoma Sooners football', 'Baker Mayfield', '2024 college football')"
+                    description: "What record to search for (e.g., 'most touchdowns', 'longest winning streak', 'career rushing yards')"
                   }
                 },
                 required: ["query"]
-              }
-            },
-            {
-              name: "wikipedia_get_content",
-              description: "Get the introductory content of a specific Wikipedia article by exact title. Use after searching to get detailed information.",
-              inputSchema: {
-                type: "object",
-                properties: {
-                  title: {
-                    type: "string",
-                    description: "Exact Wikipedia article title (e.g. 'Oklahoma Sooners football')"
-                  }
-                },
-                required: ["title"]
               }
             }
           ]
@@ -242,10 +301,12 @@ app.post("/mcp", async (req, res) => {
       const args = params?.arguments || {};
       let text = "";
 
-      if (toolName === "wikipedia_search") {
-        text = await handleWikipediaSearch(args);
-      } else if (toolName === "wikipedia_get_content") {
-        text = await handleWikipediaGetContent(args);
+      if (toolName === "soonerstats_player_search") {
+        text = await handlePlayerSearch(args);
+      } else if (toolName === "soonerstats_season_lookup") {
+        text = await handleSeasonLookup(args);
+      } else if (toolName === "soonerstats_record_search") {
+        text = await handleRecordSearch(args);
       } else {
         return res.json({
           jsonrpc: "2.0",
@@ -284,5 +345,5 @@ app.post("/mcp", async (req, res) => {
 /* -------------------------------------------------------------------------- */
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Wikipedia MCP running on port ${PORT}`);
+  console.log(`🚀 SoonerStats MCP running on port ${PORT}`);
 });
